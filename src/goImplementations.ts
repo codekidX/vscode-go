@@ -10,15 +10,15 @@ import path = require('path');
 import vscode = require('vscode');
 import { toolExecutionEnvironment } from './goEnv';
 import { promptForMissingTool } from './goInstallTools';
-import { envPath } from './goPath';
 import {
 	byteOffsetAt,
 	canonicalizeGOPATHPrefix,
 	getBinPath,
 	getGoConfig,
-	getWorkspaceFolderPath,
-	killTree
+	getWorkspaceFolderPath
 } from './util';
+import { envPath, getCurrentGoRoot } from './utils/goPath';
+import {killProcessTree} from './utils/processUtils';
 
 interface GoListOutput {
 	Dir: string;
@@ -57,7 +57,7 @@ export class GoImplementationProvider implements vscode.ImplementationProvider {
 		const goRuntimePath = getBinPath('go');
 		if (!goRuntimePath) {
 			vscode.window.showErrorMessage(
-				`Failed to run "go list" to get the scope to find implementations as the "go" binary cannot be found in either GOROOT(${process.env['GOROOT']}) or PATH(${envPath})`
+				`Failed to run "go list" to get the scope to find implementations as the "go" binary cannot be found in either GOROOT(${getCurrentGoRoot()}) or PATH(${envPath})`
 			);
 			return;
 		}
@@ -130,10 +130,10 @@ export class GoImplementationProvider implements vscode.ImplementationProvider {
 
 						return resolve(results);
 					});
-					token.onCancellationRequested(() => killTree(guruProcess.pid));
+					token.onCancellationRequested(() => killProcessTree(guruProcess));
 				}
 			);
-			token.onCancellationRequested(() => killTree(listProcess.pid));
+			token.onCancellationRequested(() => killProcessTree(listProcess));
 		});
 	}
 }

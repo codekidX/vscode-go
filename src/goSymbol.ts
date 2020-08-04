@@ -9,7 +9,9 @@ import cp = require('child_process');
 import vscode = require('vscode');
 import { toolExecutionEnvironment } from './goEnv';
 import { promptForMissingTool, promptForUpdatingTool } from './goInstallTools';
-import { getBinPath, getGoConfig, getWorkspaceFolderPath, killTree } from './util';
+import { getBinPath, getGoConfig, getWorkspaceFolderPath} from './util';
+import { getCurrentGoRoot } from './utils/goPath';
+import {killProcessTree} from './utils/processUtils';
 
 // Keep in sync with github.com/acroca/go-symbols'
 interface GoSymbolDeclaration {
@@ -93,7 +95,7 @@ export function getWorkspaceSymbols(
 	calls.push(callGoSymbols([...baseArgs, workspacePath, query], token));
 
 	if (gotoSymbolConfig.includeGoroot) {
-		const goRoot = process.env['GOROOT'];
+		const goRoot = getCurrentGoRoot();
 		const gorootCall = callGoSymbols([...baseArgs, goRoot, query], token);
 		calls.push(gorootCall);
 	}
@@ -117,7 +119,7 @@ function callGoSymbols(args: string[], token: vscode.CancellationToken): Promise
 	let p: cp.ChildProcess;
 
 	if (token) {
-		token.onCancellationRequested(() => killTree(p.pid));
+		token.onCancellationRequested(() => killProcessTree(p));
 	}
 
 	return new Promise((resolve, reject) => {

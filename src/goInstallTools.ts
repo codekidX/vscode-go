@@ -12,9 +12,9 @@ import { SemVer } from 'semver';
 import util = require('util');
 import vscode = require('vscode');
 import { toolInstallationEnvironment } from './goEnv';
+import { addGoRuntimeBaseToPATH, initGoStatusBar } from './goEnvironmentStatus';
 import { getLanguageServerToolPath } from './goLanguageServer';
 import { restartLanguageServer } from './goMain';
-import { envPath, getToolFromToolPath } from './goPath';
 import { hideGoStatus, outputChannel, showGoStatus } from './goStatus';
 import {
 	containsTool,
@@ -33,9 +33,9 @@ import {
 	getGoVersion,
 	getTempFilePath,
 	GoVersion,
-	resolvePath,
-	rmdirRecursive
+	rmdirRecursive,
 } from './util';
+import { envPath, getCurrentGoRoot, getToolFromToolPath, setCurrentGoRoot } from './utils/goPath';
 
 // declinedUpdates tracks the tools that the user has declined to update.
 const declinedUpdates: Tool[] = [];
@@ -112,7 +112,8 @@ export async function installTools(missing: ToolAtVersion[], goVersion: GoVersio
 	if (envForTools['GOBIN']) {
 		installingMsg += `the configured GOBIN: ${envForTools['GOBIN']}`;
 	} else {
-		installingMsg += `${toolsGopath}${path.sep}bin`;
+		const p = toolsGopath.split(path.delimiter).map((e) => path.join(e, 'bin')).join(path.delimiter);
+		installingMsg += `${p}`;
 	}
 
 	// If the user is on Go >= 1.11, tools should be installed with modules enabled.
@@ -176,7 +177,7 @@ export async function installTool(
 	envForTools: NodeJS.Dict<string>, modulesOn: boolean): Promise<string> {
 	// Some tools may have to be closed before we reinstall them.
 	if (tool.close) {
-		const reason = await tool.close();
+		const reason = await tool.close(envForTools);
 		if (reason) {
 			return reason;
 		}
@@ -235,10 +236,13 @@ export async function installTool(
 			if (!gopath) {
 				return `GOPATH not configured in environment`;
 			}
-			const outputFile = path.join(gopath, 'bin', process.platform === 'win32' ? `${tool.name}.exe` : tool.name);
+			const destDir = gopath.split(path.delimiter)[0];
+			const outputFile = path.join(destDir, 'bin', process.platform === 'win32' ? `${tool.name}.exe` : tool.name);
 			await execFile(goVersion.binaryPath, ['build', '-o', outputFile, importPath], opts);
 		}
-		outputChannel.appendLine(`Installing ${importPath} SUCCEEDED`);
+		const toolImportPath = tool.version ? importPath + '@' + tool.version : importPath;
+		const toolInstallPath = getBinPath(tool.name);
+		outputChannel.appendLine(`Installing ${toolImportPath} (${toolInstallPath}) SUCCEEDED`);
 	} catch (e) {
 		outputChannel.appendLine(`Installing ${importPath} FAILED`);
 		result = `failed to install ${tool}: ${e} ${output} `;
@@ -326,7 +330,7 @@ export async function promptForUpdatingTool(toolName: string, newVersion?: SemVe
 		case 'Release Notes':
 			vscode.commands.executeCommand(
 				'vscode.open',
-				vscode.Uri.parse('https://github.com/golang/go/issues/33030#issuecomment-510151934')
+				vscode.Uri.parse(`https://github.com/golang/tools/releases/tag/${tool.name}/v${newVersion}`)
 			);
 			break;
 		default:
@@ -336,44 +340,16 @@ export async function promptForUpdatingTool(toolName: string, newVersion?: SemVe
 }
 
 export function updateGoVarsFromConfig(): Promise<void> {
-	const goroot = getGoConfig()['goroot'];
-	if (goroot) {
-		process.env['GOROOT'] = resolvePath(goroot);
-	}
-
-	if (process.env['GOPATH'] && process.env['GOROOT'] && process.env['GOPROXY'] && process.env['GOBIN']) {
-		return Promise.resolve();
-	}
-
-	// If GOPATH is still not set, then use the one from `go env`
-	const goRuntimePath = getBinPath('go');
+	// FIXIT: if updateGoVarsFromConfig is called again after addGoRuntimeBaseToPATH sets PATH,
+	// the go chosen by getBinPath based on PATH will not change.
+	const goRuntimePath = getBinPath('go', false);
 	if (!goRuntimePath) {
-		vscode.window.showErrorMessage(
-			`Failed to run "go env" to find GOPATH as the "go" binary cannot be found in either GOROOT(${process.env['GOROOT']}) or PATH(${envPath})`
-		);
+		suggestDownloadGo();
 		return;
-	}
-	const goRuntimeBasePath = path.dirname(goRuntimePath);
-
-	// cgo and a few other Go tools expect Go binary to be in the path
-	let pathEnvVar: string;
-	if (process.env.hasOwnProperty('PATH')) {
-		pathEnvVar = 'PATH';
-	} else if (process.platform === 'win32' && process.env.hasOwnProperty('Path')) {
-		pathEnvVar = 'Path';
-	}
-	if (
-		goRuntimeBasePath &&
-		pathEnvVar &&
-		process.env[pathEnvVar] &&
-		(<string>process.env[pathEnvVar]).split(path.delimiter).indexOf(goRuntimeBasePath) === -1
-	) {
-		// Place the goRuntimeBasePath to the front so tools use the same version of go.
-		process.env[pathEnvVar] = goRuntimeBasePath + path.delimiter + process.env[pathEnvVar];
 	}
 
 	return new Promise<void>((resolve, reject) => {
-		cp.execFile(goRuntimePath, ['env', 'GOPATH', 'GOROOT', 'GOPROXY', 'GOBIN'], (err, stdout, stderr) => {
+		cp.execFile(goRuntimePath, ['env', 'GOPATH', 'GOROOT', 'GOPROXY', 'GOBIN', 'GOMODCACHE'], (err, stdout, stderr) => {
 			if (err) {
 				return reject();
 			}
@@ -381,8 +357,8 @@ export function updateGoVarsFromConfig(): Promise<void> {
 			if (!process.env['GOPATH'] && envOutput[0].trim()) {
 				process.env['GOPATH'] = envOutput[0].trim();
 			}
-			if (!process.env['GOROOT'] && envOutput[1] && envOutput[1].trim()) {
-				process.env['GOROOT'] = envOutput[1].trim();
+			if (envOutput[1] && envOutput[1].trim()) {
+				setCurrentGoRoot(envOutput[1].trim());
 			}
 			if (!process.env['GOPROXY'] && envOutput[2] && envOutput[2].trim()) {
 				process.env['GOPROXY'] = envOutput[2].trim();
@@ -390,6 +366,16 @@ export function updateGoVarsFromConfig(): Promise<void> {
 			if (!process.env['GOBIN'] && envOutput[3] && envOutput[3].trim()) {
 				process.env['GOBIN'] = envOutput[3].trim();
 			}
+			if (!process.env['GOMODCACHE'] && envOutput[4] && envOutput[4].trim()) {
+				process.env['GOMODCACHE'] = envOutput[4].trim();
+			}
+
+			// cgo, gopls, and other underlying tools will inherit the environment and attempt
+			// to locate 'go' from the PATH env var.
+			addGoRuntimeBaseToPATH(path.join(getCurrentGoRoot(), 'bin'));
+			initGoStatusBar();
+			// TODO: restart language server or synchronize with language server update.
+
 			return resolve();
 		});
 	});
@@ -474,4 +460,25 @@ function getMissingTools(goVersion: GoVersion): Promise<Tool[]> {
 	).then((res) => {
 		return res.filter((x) => x != null);
 	});
+}
+
+let suggestedDownloadGo = false;
+
+async function suggestDownloadGo() {
+	if (suggestedDownloadGo) {
+		vscode.window.showErrorMessage(
+			`Failed to find the "go" binary in either GOROOT(${getCurrentGoRoot()}) or PATH(${envPath}).`
+		);
+		return;
+	}
+
+	const choice = await vscode.window.showErrorMessage(
+		`Failed to find the "go" binary in either GOROOT(${getCurrentGoRoot()}) or PATH(${envPath}. ` +
+		`Check PATH, or Install Go and reload the window.`,
+		'Go to Download Page'
+	);
+	if (choice === 'Go to Download Page') {
+		vscode.env.openExternal(vscode.Uri.parse('https://golang.org/dl/'));
+	}
+	suggestedDownloadGo = true;
 }

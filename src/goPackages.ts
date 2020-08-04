@@ -8,8 +8,8 @@ import path = require('path');
 import vscode = require('vscode');
 import { toolExecutionEnvironment } from './goEnv';
 import { promptForMissingTool, promptForUpdatingTool } from './goInstallTools';
-import { envPath, fixDriveCasingInWindows, getCurrentGoWorkspaceFromGOPATH } from './goPath';
 import { getBinPath, getCurrentGoPath, getGoVersion, isVendorSupported } from './util';
+import { envPath, fixDriveCasingInWindows, getCurrentGoRoot, getCurrentGoWorkspaceFromGOPATH } from './utils/goPath';
 
 type GopkgsDone = (res: Map<string, PackageInfo>) => void;
 interface Cache {
@@ -72,7 +72,7 @@ function gopkgs(workDir?: string): Promise<Map<string, PackageInfo>> {
 				);
 				return resolve(pkgs);
 			}
-			const goroot = process.env['GOROOT'];
+			const goroot = getCurrentGoRoot();
 			const output = chunks.join('');
 			if (output.indexOf(';') === -1) {
 				// User might be using the old gopkgs tool, prompt to update
@@ -258,19 +258,27 @@ const pkgToFolderMappingRegex = /ImportPath: (.*) FolderPath: (.*)/;
 /**
  * Returns mapping between import paths and folder paths for all packages under given folder (vendor will be excluded)
  */
-export function getNonVendorPackages(currentFolderPath: string): Promise<Map<string, string>> {
+export function getNonVendorPackages(
+	currentFolderPath: string, recursive: boolean = true): Promise<Map<string, string>> {
+
+	const target = recursive ? './...' : '.';  // go list ./... excludes vendor dirs since 1.9
+	return getImportPathToFolder([target], currentFolderPath);
+}
+
+export function getImportPathToFolder(targets: string[], cwd?: string): Promise<Map<string, string>> {
 	const goRuntimePath = getBinPath('go');
 	if (!goRuntimePath) {
 		console.warn(
-			`Failed to run "go list" to find packages as the "go" binary cannot be found in either GOROOT(${process.env['GOROOT']}) or PATH(${envPath})`
+			`Failed to run "go list" to find packages as the "go" binary cannot be found in either GOROOT(${getCurrentGoRoot()}) PATH(${envPath})`
 		);
 		return;
 	}
+
 	return new Promise<Map<string, string>>((resolve, reject) => {
 		const childProcess = cp.spawn(
 			goRuntimePath,
-			['list', '-f', 'ImportPath: {{.ImportPath}} FolderPath: {{.Dir}}', './...'],
-			{ cwd: currentFolderPath, env: toolExecutionEnvironment() }
+			['list', '-f', 'ImportPath: {{.ImportPath}} FolderPath: {{.Dir}}', ...targets],
+			{ cwd, env: toolExecutionEnvironment() }
 		);
 		const chunks: any[] = [];
 		childProcess.stdout.on('data', (stdout) => {
@@ -281,16 +289,13 @@ export function getNonVendorPackages(currentFolderPath: string): Promise<Map<str
 			const lines = chunks.join('').toString().split('\n');
 			const result = new Map<string, string>();
 
-			const version = await getGoVersion();
-			const vendorAlreadyExcluded = version.gt('1.8');
-
 			lines.forEach((line) => {
 				const matches = line.match(pkgToFolderMappingRegex);
 				if (!matches || matches.length !== 3) {
 					return;
 				}
 				const [_, pkgPath, folderPath] = matches;
-				if (!pkgPath || (!vendorAlreadyExcluded && pkgPath.includes('/vendor/'))) {
+				if (!pkgPath) {
 					return;
 				}
 				result.set(pkgPath, folderPath);
